@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WebGPU World Generator</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #0f1116;
+      }
+
+      #gfx {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+        touch-action: none;
+      }
+
+      #ui-panel {
+        position: fixed;
+        top: 12px;
+        left: 12px;
+        width: 240px;
+        padding: 12px;
+        background: rgba(20, 22, 27, 0.85);
+        color: #e8eaf0;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+        font-size: 14px;
+        line-height: 1.4;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 8px;
+        backdrop-filter: blur(6px);
+        z-index: 10;
+      }
+
+      #ui-panel h2 {
+        margin: 0 0 8px 0;
+        font-size: 15px;
+        font-weight: 600;
+      }
+
+      #ui-panel label {
+        display: block;
+        margin-bottom: 10px;
+      }
+
+      #ui-panel input,
+      #ui-panel select {
+        width: 100%;
+        margin-top: 4px;
+      }
+
+      #ui-panel .value {
+        display: inline-block;
+        min-width: 36px;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+        margin-left: 6px;
+        color: #c3cad6;
+      }
+
+      #ui-panel .hint {
+        margin: 6px 0 0 0;
+        font-size: 12px;
+        color: #9aa3b5;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="ui-panel">
+      <h2>Terrain Controls</h2>
+      <label>
+        Brush Mode
+        <select id="brush-mode">
+          <option value="raise">Raise</option>
+          <option value="lower">Lower</option>
+          <option value="smooth">Smooth</option>
+        </select>
+      </label>
+      <label>
+        Brush Radius
+        <input id="brush-radius" type="range" min="1" max="50" value="10" />
+        <span class="value" data-for="brush-radius">10</span>
+      </label>
+      <label>
+        Brush Intensity
+        <input
+          id="brush-intensity"
+          type="range"
+          min="0.01"
+          max="0.5"
+          step="0.01"
+          value="0.12"
+        />
+        <span class="value" data-for="brush-intensity">0.12</span>
+      </label>
+      <label>
+        Height Low
+        <input id="height-low" type="range" min="-5" max="5" step="0.1" value="-1" />
+        <span class="value" data-for="height-low">-1</span>
+      </label>
+      <label>
+        Height High
+        <input id="height-high" type="range" min="0" max="10" step="0.1" value="4" />
+        <span class="value" data-for="height-high">4</span>
+      </label>
+      <label>
+        Slope Threshold
+        <input
+          id="slope-threshold"
+          type="range"
+          min="0"
+          max="1"
+          step="0.01"
+          value="0.35"
+        />
+        <span class="value" data-for="slope-threshold">0.35</span>
+      </label>
+      <p class="hint">CTRL + mouse to sculpt (mode from selector).</p>
+    </div>
+    <canvas id="gfx"></canvas>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
