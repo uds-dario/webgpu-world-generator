@@ -1,5 +1,11 @@
+import * as THREE from "three";
 import { createScene } from "./scene";
 import { Heightfield } from "./heightfield";
+import {
+  createGrassDensityMap,
+  GrassDensityMap,
+  createGrassInstancedMesh,
+} from "./grass";
 import {
   createTerrain,
   updateTerrainGeometryFromHeightfield,
@@ -51,11 +57,15 @@ const heightfield = new Heightfield(256, 256, {
 
 const heightScale = 2.5;
 const terrainMesh = createTerrain(heightfield, heightScale);
+let grassDensity: GrassDensityMap | null = null;
+let grassMesh: THREE.InstancedMesh | null = null;
 scene.add(terrainMesh);
 refreshTerrain();
+refreshGrassDensity();
 
 ui.subscribe(() => {
   refreshTerrain();
+  refreshGrassDensity();
 });
 
 setupInput(canvas, camera, terrainMesh, ({ uv, buttons, ctrlKey }) => {
@@ -107,6 +117,34 @@ function refreshTerrain() {
     heightHigh: uiState.heightHigh,
     slopeThreshold: uiState.slopeThreshold,
   });
+}
+
+function refreshGrassDensity() {
+  const uiState = ui.getState();
+  grassDensity = createGrassDensityMap(heightfield, {
+    minHeight: uiState.heightLow,
+    maxHeight: uiState.heightHigh,
+    maxSlope: uiState.slopeThreshold,
+  });
+  console.log("Grass density map rebuilt", {
+    width: grassDensity.width,
+    height: grassDensity.height,
+  });
+  rebuildGrassMesh();
+}
+
+function rebuildGrassMesh() {
+  if (!grassDensity) return;
+  if (grassMesh) {
+    scene.remove(grassMesh);
+    grassMesh.geometry.dispose();
+    grassMesh.material.dispose();
+  }
+  grassMesh = createGrassInstancedMesh(heightfield, grassDensity, {
+    heightScale,
+    maxInstances: 50000,
+  });
+  scene.add(grassMesh);
 }
 
 function clampIndex(value: number, min: number, max: number) {
