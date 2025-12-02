@@ -5,6 +5,7 @@ import {
   createGrassDensityMap,
   GrassDensityMap,
   createGrassInstancedMesh,
+  updateGrassWind,
 } from "./grass";
 import {
   createTerrain,
@@ -158,7 +159,13 @@ function resize() {
   renderer.setSize(window.innerWidth, window.innerHeight);
 }
 
-function render() {
+let startTime = performance.now();
+
+function render(now: number) {
+  const elapsed = (now - startTime) * 0.001;
+
+  updateGrassWind(elapsed);
+
   controls.update();
   renderer.render(scene, camera);
   requestAnimationFrame(render);
@@ -166,4 +173,4 @@ function render() {
 
 window.addEventListener("resize", resize);
 resize();
-render();
+requestAnimationFrame(render);

@@ -2,6 +2,7 @@ import {
   ClampToEdgeWrapping,
   DataTexture,
   Euler,
+  BufferAttribute,
   FloatType,
   InstancedMesh,
   Matrix4,
@@ -11,6 +12,7 @@ import {
   Quaternion,
   RedFormat,
   SRGBColorSpace,
+  Vector2,
   Vector3,
 } from "three";
 import { Heightfield } from "./heightfield";
@@ -32,6 +34,22 @@ export type GrassDensityParams = {
 export type GrassInstancingOptions = {
   heightScale: number;
   maxInstances?: number; // default: es. 50_000
+};
+
+type GrassWindUniforms = {
+  uTime: { value: number };
+  uWindStrength: { value: number };
+  uWindFrequency: { value: number };
+  uWindNoiseScale: { value: number };
+  uWindDirection: { value: Vector2 };
+};
+
+const windUniforms: GrassWindUniforms = {
+  uTime: { value: 0 },
+  uWindStrength: { value: 0.25 },
+  uWindFrequency: { value: 1.5 },
+  uWindNoiseScale: { value: 0.8 },
+  uWindDirection: { value: new Vector2(1, 0).normalize() },
 };
 
 export function createGrassDensityMap(
@@ -103,11 +121,29 @@ export function createGrassInstancedMesh(
   options: GrassInstancingOptions,
 ): InstancedMesh {
   const maxInstances = options.maxInstances ?? 50_000;
-  const bladeWidth = 0.06;
-  const bladeHeight = 0.6;
+  const bladeHeight = 1;
+  const bladeWidth = 0.08;
+  const segmentsY = 4;
 
-  const geometry = new PlaneGeometry(bladeWidth, bladeHeight);
+  const geometry = new PlaneGeometry(bladeWidth, bladeHeight, 1, segmentsY);
   geometry.translate(0, bladeHeight / 2, 0);
+  geometry.rotateY(Math.PI);
+
+  const pos = geometry.getAttribute("position") as BufferAttribute;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i);
+    const y = pos.getY(i);
+    const z = pos.getZ(i);
+    const t = y / bladeHeight;
+    const widthScale = 1 - 0.7 * t;
+    const newX = x * widthScale;
+    const bendAmount = 0.25;
+    const bend = bendAmount * t * t;
+    const newZ = z + bend;
+    pos.setXYZ(i, newX, y, newZ);
+  }
+  pos.needsUpdate = true;
+  geometry.computeVertexNormals();
 
   const material = new MeshStandardMaterial({
     color: "#5bbf3a",
@@ -115,6 +151,36 @@ export function createGrassInstancedMesh(
     roughness: 0.9,
     map: null,
   });
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.uTime = windUniforms.uTime;
+    shader.uniforms.uWindStrength = windUniforms.uWindStrength;
+    shader.uniforms.uWindFrequency = windUniforms.uWindFrequency;
+    shader.uniforms.uWindNoiseScale = windUniforms.uWindNoiseScale;
+    shader.uniforms.uWindDirection = windUniforms.uWindDirection;
+
+    shader.vertexShader = `
+    uniform float uTime;
+    uniform float uWindStrength;
+    uniform float uWindFrequency;
+    uniform float uWindNoiseScale;
+    uniform vec2 uWindDirection;
+  ` + shader.vertexShader;
+
+    shader.vertexShader = shader.vertexShader.replace(
+      "#include <begin_vertex>",
+      `
+    #include <begin_vertex>
+    vec2 windDir = normalize(uWindDirection);
+    float wavePhase = dot(transformed.xz * uWindNoiseScale, windDir) * uWindFrequency + uTime;
+    float wind = sin(wavePhase);
+
+    float heightFactor = clamp(position.y, 0.0, 1.0);
+    float bend = wind * uWindStrength * heightFactor;
+
+    transformed.xz += windDir * bend;
+    `,
+    );
+  };
   (material as MeshStandardMaterial & { colorSpace?: SRGBColorSpace }).colorSpace =
     SRGBColorSpace;
 
@@ -173,6 +239,10 @@ export function createGrassInstancedMesh(
 
   mesh.instanceMatrix.needsUpdate = true;
   return mesh;
+}
+
+export function updateGrassWind(timeSeconds: number) {
+  windUniforms.uTime.value = timeSeconds;
 }
 
 export function getGrassDensityAtUV(
