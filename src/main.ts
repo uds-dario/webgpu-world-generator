@@ -1,11 +1,20 @@
-import * as THREE from "three";
-import { createScene } from "./scene";
+import {
+  AmbientLight,
+  Color,
+  DirectionalLight,
+  InstancedMesh,
+  PerspectiveCamera,
+  Scene,
+} from "three";
+import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { WebGPURenderer } from "three/webgpu";
 import { Heightfield } from "./heightfield";
 import {
   createGrassDensityMap,
   GrassDensityMap,
   createGrassInstancedMesh,
   updateGrassWind,
+  GrassLodContext,
 } from "./grass";
 import {
   createTerrain,
@@ -14,15 +23,51 @@ import {
 } from "./terrain";
 import { setupInput } from "./input";
 import { applyBrush, SculptBrushConfig } from "./sculpt";
-import { setupUI } from "./ui";
+import * as ui from "./ui";
 
-const canvas = document.getElementById("gfx") as HTMLCanvasElement | null;
+const canvas = document.querySelector<HTMLCanvasElement>("#gfx");
 if (!canvas) {
   throw new Error("Canvas #gfx non trovato");
 }
 
-const { scene, camera, renderer, controls } = createScene(canvas);
-const ui = setupUI();
+if (!("gpu" in navigator)) {
+  const message =
+    "WebGPU non è supportato da questo browser / device. " +
+    "Per eseguire questo progetto è necessario un browser con WebGPU abilitato (es. Chrome/Edge aggiornati su GPU compatibile).";
+  console.error(message);
+  alert(message);
+  throw new Error("WebGPU not available");
+}
+
+const scene = new Scene();
+scene.background = new Color(0x20252b);
+
+const camera = new PerspectiveCamera(
+  60,
+  window.innerWidth / window.innerHeight,
+  0.1,
+  1000,
+);
+camera.position.set(0, 10, 20);
+
+const renderer = new WebGPURenderer({
+  canvas,
+  antialias: true,
+});
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setClearColor(new Color(0x000000));
+
+const ambientLight = new AmbientLight(0xffffff, 0.5);
+scene.add(ambientLight);
+
+const directionalLight = new DirectionalLight(0xffffff, 0.8);
+directionalLight.position.set(10, 20, 10);
+scene.add(directionalLight);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+ui.setupUI();
 
 const brushConfig: SculptBrushConfig = {
   radius: 10,
@@ -59,7 +104,8 @@ const heightfield = new Heightfield(256, 256, {
 const heightScale = 2.5;
 const terrainMesh = createTerrain(heightfield, heightScale);
 let grassDensity: GrassDensityMap | null = null;
-let grassMesh: THREE.InstancedMesh | null = null;
+let grassMesh: InstancedMesh | null = null;
+let grassLodContext: GrassLodContext | null = null;
 scene.add(terrainMesh);
 refreshTerrain();
 refreshGrassDensity();
@@ -99,6 +145,7 @@ setupInput(canvas, camera, terrainMesh, ({ uv, buttons, ctrlKey }) => {
 
   applyBrush(heightfield, xIndex, yIndex, { ...brushConfig, mode });
   refreshTerrain();
+  refreshGrassDensity();
 
   const height = heightfield.getHeight(xIndex, yIndex);
   console.log(
@@ -141,10 +188,14 @@ function rebuildGrassMesh() {
     grassMesh.geometry.dispose();
     grassMesh.material.dispose();
   }
-  grassMesh = createGrassInstancedMesh(heightfield, grassDensity, {
+  grassLodContext = null;
+  const uiState = ui.getState();
+  const result = createGrassInstancedMesh(heightfield, grassDensity, {
     heightScale,
-    maxInstances: 50000,
+    maxInstances: uiState.maxGrassInstances,
   });
+  grassMesh = result.mesh;
+  grassLodContext = result.lod;
   scene.add(grassMesh);
 }
 
@@ -155,7 +206,7 @@ function clampIndex(value: number, min: number, max: number) {
 function resize() {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setPixelRatio(window.devicePixelRatio);
   renderer.setSize(window.innerWidth, window.innerHeight);
 }
 
@@ -164,7 +215,18 @@ let startTime = performance.now();
 function render(now: number) {
   const elapsed = (now - startTime) * 0.001;
 
-  updateGrassWind(elapsed);
+  const uiState = ui.getState();
+  updateGrassWind(elapsed, {
+    windStrength: uiState.windStrength,
+    windFrequency: uiState.windFrequency,
+    gustStrength: uiState.gustStrength,
+    grassVariation: uiState.grassVariation,
+  });
+
+  if (grassLodContext && grassLodContext.patches.length > 0) {
+    // TODO: usare GrassLodContext per LOD per patch (es. ridurre contributo delle patch lontane).
+    // Per ora nessun cambiamento a grassMesh.count.
+  }
 
   controls.update();
   renderer.render(scene, camera);
@@ -172,5 +234,13 @@ function render(now: number) {
 }
 
 window.addEventListener("resize", resize);
-resize();
-requestAnimationFrame(render);
+
+async function start() {
+  await renderer.init();
+  resize();
+  requestAnimationFrame(render);
+}
+
+start().catch((error) => {
+  console.error("Failed to initialize renderer", error);
+});

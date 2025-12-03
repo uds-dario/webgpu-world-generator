@@ -5,16 +5,21 @@ import {
   BufferAttribute,
   FloatType,
   InstancedMesh,
+  InstancedBufferAttribute,
   Matrix4,
-  MeshStandardMaterial,
   NearestFilter,
   PlaneGeometry,
   Quaternion,
   RedFormat,
   SRGBColorSpace,
+  RepeatWrapping,
+  TextureLoader,
   Vector2,
   Vector3,
+  Color,
 } from "three";
+import { MeshStandardNodeMaterial, TSL } from "three/webgpu";
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { Heightfield } from "./heightfield";
 
 export type GrassDensityMap = {
@@ -36,21 +41,89 @@ export type GrassInstancingOptions = {
   maxInstances?: number; // default: es. 50_000
 };
 
-type GrassWindUniforms = {
-  uTime: { value: number };
-  uWindStrength: { value: number };
-  uWindFrequency: { value: number };
-  uWindNoiseScale: { value: number };
-  uWindDirection: { value: Vector2 };
+export type GrassPatch = {
+  center: Vector3;
+  radius: number;
+  startInstance: number;
+  instanceCount: number;
 };
 
-const windUniforms: GrassWindUniforms = {
-  uTime: { value: 0 },
-  uWindStrength: { value: 0.25 },
-  uWindFrequency: { value: 1.5 },
-  uWindNoiseScale: { value: 0.8 },
-  uWindDirection: { value: new Vector2(1, 0).normalize() },
+export type GrassLodContext = {
+  patches: GrassPatch[];
+  maxInstances: number;
 };
+
+export type GrassInstanceResult = {
+  mesh: InstancedMesh;
+  lod: GrassLodContext;
+};
+
+export type GrassWindParams = {
+  windStrength: number;
+  windFrequency: number;
+  gustStrength: number;
+  grassVariation?: number;
+};
+
+const baseGrassColor = new Color("#5bbf3a");
+const dryGrassColor = new Color("#c1b46a");
+const { attribute, uniform, vec2, vec3, positionLocal, materialColor } = TSL;
+
+const textureLoader = new TextureLoader();
+
+const grassAlbedo = textureLoader.load("/textures/grass_albedo.jpg");
+grassAlbedo.colorSpace = SRGBColorSpace;
+grassAlbedo.wrapS = grassAlbedo.wrapT = RepeatWrapping;
+
+const grassNormal = textureLoader.load("/textures/grass_normal.png");
+grassNormal.wrapS = grassNormal.wrapT = RepeatWrapping;
+
+const grassOrm = textureLoader.load("/textures/grass_orm.png");
+grassOrm.wrapS = grassOrm.wrapT = RepeatWrapping;
+
+const windUniforms = {
+  uTime: uniform(0),
+  uWindStrength: uniform(0.25),
+  uWindFrequency: uniform(1.5),
+  uWindNoiseScale: uniform(0.8),
+  uWindDirection: uniform(new Vector2(1, 0).normalize()),
+  uGustStrength: uniform(0.35),
+  uGustFrequency: uniform(0.5),
+  uGustNoiseScale: uniform(0.25),
+  uGrassVariation: uniform(0.5),
+  uMicroSwayStrength: uniform(0.08),
+};
+
+function createSingleBladeGeometry(): PlaneGeometry {
+  const bladeHeight = 1;
+  const bladeWidth = 0.08;
+  const segmentsY = 4;
+  const geometry = new PlaneGeometry(
+    bladeWidth,
+    bladeHeight,
+    1,
+    segmentsY,
+  );
+  geometry.translate(0, bladeHeight / 2, 0);
+  geometry.rotateY(Math.PI);
+
+  const pos = geometry.getAttribute("position") as BufferAttribute;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i);
+    const y = pos.getY(i);
+    const z = pos.getZ(i);
+    const t = y / bladeHeight;
+    const widthScale = 1 - 0.7 * t;
+    const newX = x * widthScale;
+    const bendAmount = 0.25;
+    const bend = bendAmount * t * t;
+    const newZ = z + bend;
+    pos.setXYZ(i, newX, y, newZ);
+  }
+  pos.needsUpdate = true;
+  geometry.computeVertexNormals();
+  return geometry;
+}
 
 export function createGrassDensityMap(
   heightfield: Heightfield,
@@ -119,72 +192,138 @@ export function createGrassInstancedMesh(
   heightfield: Heightfield,
   density: GrassDensityMap,
   options: GrassInstancingOptions,
-): InstancedMesh {
+): GrassInstanceResult {
   const maxInstances = options.maxInstances ?? 50_000;
-  const bladeHeight = 1;
-  const bladeWidth = 0.08;
-  const segmentsY = 4;
+  const maxPerTexel = 3;
 
-  const geometry = new PlaneGeometry(bladeWidth, bladeHeight, 1, segmentsY);
-  geometry.translate(0, bladeHeight / 2, 0);
-  geometry.rotateY(Math.PI);
-
-  const pos = geometry.getAttribute("position") as BufferAttribute;
-  for (let i = 0; i < pos.count; i++) {
-    const x = pos.getX(i);
-    const y = pos.getY(i);
-    const z = pos.getZ(i);
-    const t = y / bladeHeight;
-    const widthScale = 1 - 0.7 * t;
-    const newX = x * widthScale;
-    const bendAmount = 0.25;
-    const bend = bendAmount * t * t;
-    const newZ = z + bend;
-    pos.setXYZ(i, newX, y, newZ);
+  // Compute expected total instances to scale uniformly when capped.
+  let totalExpected = 0;
+  for (let y = 0; y < density.height; y++) {
+    for (let x = 0; x < density.width; x++) {
+      const densityValue = density.data[y * density.width + x];
+      if (densityValue <= 0) continue;
+      totalExpected += densityValue * maxPerTexel;
+    }
   }
-  pos.needsUpdate = true;
-  geometry.computeVertexNormals();
+  const scaleFactor =
+    totalExpected > maxInstances && totalExpected > 0
+      ? maxInstances / totalExpected
+      : 1;
 
-  const material = new MeshStandardMaterial({
-    color: "#5bbf3a",
-    metalness: 0.05,
-    roughness: 0.9,
-    map: null,
+  const bladeGeometryA = createSingleBladeGeometry();
+  const bladeGeometryB = createSingleBladeGeometry();
+  bladeGeometryB.rotateY(Math.PI * 0.5);
+
+  const crossGeometry = mergeGeometries(
+    [bladeGeometryA, bladeGeometryB],
+    false,
+  )!;
+  crossGeometry.computeVertexNormals();
+  bladeGeometryA.dispose();
+  bladeGeometryB.dispose();
+  const geometry = crossGeometry;
+
+  const instancePhaseOffsetAttr = attribute("instancePhaseOffset", "float");
+  const instanceStiffnessAttr = attribute("instanceStiffness", "float");
+  const instanceColorFactorAttr = attribute("instanceColorFactor", "float");
+  const instanceHeightFactorAttr = attribute("instanceHeightFactor", "float");
+
+  const windDir = windUniforms.uWindDirection.normalize();
+  const gustDir = vec2(windDir.y.negate(), windDir.x);
+
+  const heightMul = instanceHeightFactorAttr
+    .mul(windUniforms.uGrassVariation)
+    .mul(0.6)
+    .add(0.7); // mix(0.7, 1.3, instanceHeightFactor * variation)
+
+  const basePhase = positionLocal.xz
+    .mul(windUniforms.uWindNoiseScale)
+    .dot(windDir)
+    .mul(windUniforms.uWindFrequency)
+    .add(windUniforms.uTime)
+    .add(instancePhaseOffsetAttr);
+  const baseWind = basePhase.sin();
+
+  const gustPhase = positionLocal.xz
+    .mul(windUniforms.uGustNoiseScale)
+    .dot(gustDir)
+    .mul(windUniforms.uGustFrequency)
+    .add(windUniforms.uTime.mul(0.5))
+    .add(instancePhaseOffsetAttr.mul(0.5));
+  const gustWind = gustPhase.sin();
+
+  const macroWind = baseWind;
+
+  const gustWindWeighted = gustWind.mul(windUniforms.uGustStrength);
+
+  const microPhase = windUniforms.uTime
+    .mul(2)
+    .add(instancePhaseOffsetAttr.mul(4))
+    .add(positionLocal.y.mul(3));
+  const microWind = microPhase.sin().mul(windUniforms.uMicroSwayStrength);
+
+  const combinedWind = macroWind.add(gustWindWeighted).add(microWind);
+  const heightFactor = positionLocal.y.mul(heightMul).clamp(0, 1);
+  const stiffnessFactor = instanceStiffnessAttr.mul(0.8).add(0.4);
+  const bend = combinedWind
+    .mul(windUniforms.uWindStrength)
+    .mul(heightFactor)
+    .mul(stiffnessFactor);
+
+  const bendOffset = windDir.mul(bend);
+  const displacedXZ = positionLocal.xz.add(bendOffset);
+  const displacedPosition = vec3(displacedXZ.x, positionLocal.y.mul(heightMul), displacedXZ.y);
+
+  const baseColorNode = materialColor.rgb;
+  const dryColorNode = vec3(0.76, 0.71, 0.42);
+  const lushColorNode = vec3(0.35, 0.8, 0.35);
+  const variation = instanceColorFactorAttr
+    .sub(0.5)
+    .mul(2)
+    .mul(windUniforms.uGrassVariation);
+  const dryFactor = variation.max(0);
+  const lushFactor = variation.min(0).negate();
+  const colorAdjust = dryColorNode
+    .sub(baseColorNode)
+    .mul(dryFactor)
+    .add(lushColorNode.sub(baseColorNode).mul(lushFactor));
+  const finalColor = baseColorNode.add(colorAdjust);
+
+  const material = new MeshStandardNodeMaterial({
+    color: baseGrassColor,
+    map: grassAlbedo,
+    normalMap: grassNormal,
+    roughnessMap: grassOrm,
+    metalnessMap: grassOrm,
+    roughness: 1.0,
+    metalness: 0.0,
+    alphaTest: 0.4,
+    transparent: true,
   });
-  material.onBeforeCompile = (shader) => {
-    shader.uniforms.uTime = windUniforms.uTime;
-    shader.uniforms.uWindStrength = windUniforms.uWindStrength;
-    shader.uniforms.uWindFrequency = windUniforms.uWindFrequency;
-    shader.uniforms.uWindNoiseScale = windUniforms.uWindNoiseScale;
-    shader.uniforms.uWindDirection = windUniforms.uWindDirection;
-
-    shader.vertexShader = `
-    uniform float uTime;
-    uniform float uWindStrength;
-    uniform float uWindFrequency;
-    uniform float uWindNoiseScale;
-    uniform vec2 uWindDirection;
-  ` + shader.vertexShader;
-
-    shader.vertexShader = shader.vertexShader.replace(
-      "#include <begin_vertex>",
-      `
-    #include <begin_vertex>
-    vec2 windDir = normalize(uWindDirection);
-    float wavePhase = dot(transformed.xz * uWindNoiseScale, windDir) * uWindFrequency + uTime;
-    float wind = sin(wavePhase);
-
-    float heightFactor = clamp(position.y, 0.0, 1.0);
-    float bend = wind * uWindStrength * heightFactor;
-
-    transformed.xz += windDir * bend;
-    `,
-    );
-  };
-  (material as MeshStandardMaterial & { colorSpace?: SRGBColorSpace }).colorSpace =
+  material.positionNode = displacedPosition;
+  material.colorNode = finalColor;
+  material.normalScale.set(1, 1);
+  (material as MeshStandardNodeMaterial & { colorSpace?: SRGBColorSpace }).colorSpace =
     SRGBColorSpace;
 
   const mesh = new InstancedMesh(geometry, material, maxInstances);
+  const phaseArray = new Float32Array(maxInstances);
+  const stiffnessArray = new Float32Array(maxInstances);
+  const phaseAttr: InstancedBufferAttribute = new InstancedBufferAttribute(phaseArray, 1);
+  const stiffnessAttr: InstancedBufferAttribute = new InstancedBufferAttribute(
+    stiffnessArray,
+    1,
+  );
+  const colorFactorArray = new Float32Array(maxInstances);
+  const heightFactorArray = new Float32Array(maxInstances);
+  const colorFactorAttr: InstancedBufferAttribute = new InstancedBufferAttribute(
+    colorFactorArray,
+    1,
+  );
+  const heightFactorAttr: InstancedBufferAttribute = new InstancedBufferAttribute(
+    heightFactorArray,
+    1,
+  );
   const matrix = new Matrix4();
   const position = new Vector3();
   const scale = new Vector3(1, 1, 1);
@@ -194,55 +333,140 @@ export function createGrassInstancedMesh(
   const worldWidth = heightfield.width - 1;
   const worldHeight = heightfield.height - 1;
 
+  const patchCountX = 16;
+  const patchCountY = 16;
+  const texelsPerPatchX = Math.ceil(density.width / patchCountX);
+  const texelsPerPatchY = Math.ceil(density.height / patchCountY);
+
+  const patches: GrassPatch[] = [];
+
   let instanceIndex = 0;
-  for (let y = 0; y < density.height; y++) {
-    for (let x = 0; x < density.width; x++) {
-      if (instanceIndex >= maxInstances) break;
 
-      const densityValue = density.data[y * density.width + x];
-      if (densityValue <= 0) continue;
+  for (let py = 0; py < patchCountY; py++) {
+    const yStart = py * texelsPerPatchY;
+    const yEnd = Math.min(density.height, yStart + texelsPerPatchY);
 
-      const u = density.width > 0 ? (x + 0.5) / density.width : 0.5;
-      const v = density.height > 0 ? (y + 0.5) / density.height : 0.5;
+    for (let px = 0; px < patchCountX; px++) {
+      const xStart = px * texelsPerPatchX;
+      const xEnd = Math.min(density.width, xStart + texelsPerPatchX);
 
-      const baseRand = pseudoRandom(x, y, 0.37);
-      const maxPerTexel = 3;
-      const expected = densityValue * maxPerTexel;
-      const count =
-        Math.floor(expected) + (baseRand < expected - Math.floor(expected) ? 1 : 0);
+      const patchStart = instanceIndex;
 
-      for (let i = 0; i < count && instanceIndex < maxInstances; i++) {
-        const localRand = pseudoRandom(x, y, i * 1.37 + baseRand);
-        const jitterX = pseudoRandom(x, y, i * 2.11) - 0.5;
-        const jitterZ = pseudoRandom(x, y, i * 3.73 + 1) - 0.5;
-        const worldX = (u - 0.5) * worldWidth + jitterX * 0.4;
-        const worldZ = (v - 0.5) * worldHeight + jitterZ * 0.4;
-        const height = sampleHeight(heightfield, u, v) * options.heightScale;
+      let sumX = 0;
+      let sumY = 0;
+      let sumZ = 0;
+      let sampleCount = 0;
 
-        position.set(worldX, height, worldZ);
-        const yaw = localRand * Math.PI * 2;
-        const tiltX = (pseudoRandom(x, y, i * 5.13) - 0.5) * 0.2;
-        const tiltZ = (pseudoRandom(x, y, i * 7.91) - 0.5) * 0.2;
-        rotation.set(tiltX, yaw, tiltZ);
+      for (let y = yStart; y < yEnd && instanceIndex < maxInstances; y++) {
+        for (let x = xStart; x < xEnd && instanceIndex < maxInstances; x++) {
+          const densityValue = density.data[y * density.width + x];
+          if (densityValue <= 0) continue;
 
-        const scaleY = 0.8 + localRand * 0.6;
-        const scaleX = 0.6 + pseudoRandom(x, y, i * 9.31) * 0.5;
-        scale.set(scaleX, scaleY, 1);
+          const u = density.width > 0 ? (x + 0.5) / density.width : 0.5;
+          const v = density.height > 0 ? (y + 0.5) / density.height : 0.5;
 
-        quaternion.setFromEuler(rotation);
-        matrix.compose(position, quaternion, scale);
-        mesh.setMatrixAt(instanceIndex, matrix);
-        instanceIndex++;
+          const baseRand = pseudoRandom(x, y, 0.37);
+          const expected = densityValue * maxPerTexel;
+          const scaledExpected = expected * scaleFactor;
+          const baseCount = Math.floor(scaledExpected);
+          const fractional = scaledExpected - baseCount;
+          let count = baseCount + (baseRand < fractional ? 1 : 0);
+          const remaining = maxInstances - instanceIndex;
+          if (count > remaining) {
+            count = remaining;
+          }
+          if (count <= 0) continue;
+
+          for (let i = 0; i < count && instanceIndex < maxInstances; i++) {
+            const localRand = pseudoRandom(x, y, i * 1.37 + baseRand);
+            const jitterX = pseudoRandom(x, y, i * 2.11) - 0.5;
+            const jitterZ = pseudoRandom(x, y, i * 3.73 + 1) - 0.5;
+            const worldX = (u - 0.5) * worldWidth + jitterX * 0.4;
+            const worldZ = (v - 0.5) * worldHeight + jitterZ * 0.4;
+            const height = sampleHeight(heightfield, u, v) * options.heightScale;
+
+            position.set(worldX, height, worldZ);
+            const yaw = localRand * Math.PI * 2;
+            const tiltX = (pseudoRandom(x, y, i * 5.13) - 0.5) * 0.2;
+            const tiltZ = (pseudoRandom(x, y, i * 7.91) - 0.5) * 0.2;
+            rotation.set(tiltX, yaw, tiltZ);
+
+            const scaleY = 0.8 + localRand * 0.6;
+            const scaleX = 0.6 + pseudoRandom(x, y, i * 9.31) * 0.5;
+            scale.set(scaleX, scaleY, 1);
+
+            quaternion.setFromEuler(rotation);
+            matrix.compose(position, quaternion, scale);
+            const variation = Math.random();
+            phaseArray[instanceIndex] = Math.random() * Math.PI * 2;
+            stiffnessArray[instanceIndex] = Math.random();
+            colorFactorArray[instanceIndex] = variation;
+            heightFactorArray[instanceIndex] = variation;
+            mesh.setMatrixAt(instanceIndex, matrix);
+
+            sumX += worldX;
+            sumY += height;
+            sumZ += worldZ;
+            sampleCount++;
+            instanceIndex++;
+          }
+        }
+      }
+
+      const patchInstanceCount = instanceIndex - patchStart;
+      if (patchInstanceCount > 0 && sampleCount > 0) {
+        const center = new Vector3(
+          sumX / sampleCount,
+          sumY / sampleCount,
+          sumZ / sampleCount,
+        );
+        const patchWidthWorld =
+          ((xEnd - xStart) / Math.max(1, density.width)) * worldWidth;
+        const patchHeightWorld =
+          ((yEnd - yStart) / Math.max(1, density.height)) * worldHeight;
+        const radius = Math.sqrt(
+          (patchWidthWorld * patchWidthWorld +
+            patchHeightWorld * patchHeightWorld) *
+            0.25,
+        );
+        patches.push({
+          center,
+          radius,
+          startInstance: patchStart,
+          instanceCount: patchInstanceCount,
+        });
       }
     }
   }
 
+  geometry.setAttribute("instancePhaseOffset", phaseAttr);
+  geometry.setAttribute("instanceStiffness", stiffnessAttr);
+  geometry.setAttribute("instanceColorFactor", colorFactorAttr);
+  geometry.setAttribute("instanceHeightFactor", heightFactorAttr);
+  mesh.count = instanceIndex;
   mesh.instanceMatrix.needsUpdate = true;
-  return mesh;
+  return {
+    mesh,
+    lod: {
+      patches,
+      maxInstances,
+    },
+  };
 }
 
-export function updateGrassWind(timeSeconds: number) {
+export function updateGrassWind(
+  timeSeconds: number,
+  params?: GrassWindParams,
+) {
   windUniforms.uTime.value = timeSeconds;
+  if (params) {
+    windUniforms.uWindStrength.value = params.windStrength;
+    windUniforms.uWindFrequency.value = params.windFrequency;
+    windUniforms.uGustStrength.value = params.gustStrength;
+    if (typeof params.grassVariation === "number") {
+      windUniforms.uGrassVariation.value = params.grassVariation;
+    }
+  }
 }
 
 export function getGrassDensityAtUV(

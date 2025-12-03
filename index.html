@@ -77,14 +77,6 @@
     <div id="ui-panel">
       <h2>Terrain Controls</h2>
       <label>
-        Brush Mode
-        <select id="brush-mode">
-          <option value="raise">Raise</option>
-          <option value="lower">Lower</option>
-          <option value="smooth">Smooth</option>
-        </select>
-      </label>
-      <label>
         Brush Radius
         <input id="brush-radius" type="range" min="1" max="50" value="10" />
         <span class="value" data-for="brush-radius">10</span>
@@ -123,6 +115,69 @@
         />
         <span class="value" data-for="slope-threshold">0.35</span>
       </label>
+      <fieldset>
+        <legend>Grass &amp; Wind</legend>
+        <label>
+          Wind Strength
+          <input
+            id="wind-strength"
+            type="range"
+            min="0"
+            max="1"
+            step="0.01"
+            value="0.25"
+          />
+          <span class="value" data-for="wind-strength">0.25</span>
+        </label>
+        <label>
+          Wind Frequency
+          <input
+            id="wind-frequency"
+            type="range"
+            min="0.1"
+            max="4"
+            step="0.1"
+            value="1.5"
+          />
+          <span class="value" data-for="wind-frequency">1.5</span>
+        </label>
+        <label>
+          Gust Strength
+          <input
+            id="gust-strength"
+            type="range"
+            min="0"
+            max="1"
+            step="0.01"
+            value="0.35"
+          />
+          <span class="value" data-for="gust-strength">0.35</span>
+        </label>
+        <label>
+          Grass Variation
+          <input
+            id="grass-variation"
+            type="range"
+            min="0"
+            max="1"
+            step="0.01"
+            value="0.5"
+          />
+          <span class="value" data-for="grass-variation">0.5</span>
+        </label>
+        <label>
+          Max Grass Instances
+          <input
+            id="max-grass-instances"
+            type="range"
+            min="5000"
+            max="200000"
+            step="5000"
+            value="50000"
+          />
+          <span class="value" data-for="max-grass-instances">50000</span>
+        </label>
+      </fieldset>
       <p class="hint">CTRL + mouse to sculpt (mode from selector).</p>
     </div>
     <canvas id="gfx"></canvas>
