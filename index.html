@@ -25,7 +25,7 @@
       #ui-panel {
         position: fixed;
         top: 12px;
-        left: 12px;
+        right: 12px;
         width: 240px;
         padding: 12px;
         background: rgba(20, 22, 27, 0.85);
@@ -71,9 +71,27 @@
         font-size: 12px;
         color: #9aa3b5;
       }
+
+      #fps-counter {
+        position: fixed;
+        top: 12px;
+        left: 12px;
+        padding: 8px 10px;
+        background: rgba(20, 22, 27, 0.85);
+        color: #e8eaf0;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+        font-size: 13px;
+        line-height: 1.4;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 6px;
+        backdrop-filter: blur(6px);
+        z-index: 12;
+      }
     </style>
   </head>
   <body>
+    <div id="fps-counter">FPS: --</div>
     <div id="ui-panel">
       <h2>Terrain Controls</h2>
       <label>
@@ -161,21 +179,21 @@
             min="0"
             max="1"
             step="0.01"
-            value="0.5"
+            value="1"
           />
-          <span class="value" data-for="grass-variation">0.5</span>
+          <span class="value" data-for="grass-variation">1</span>
         </label>
         <label>
           Max Grass Instances
           <input
             id="max-grass-instances"
             type="range"
-            min="5000"
-            max="200000"
-            step="5000"
-            value="50000"
+            min="50000"
+            max="400000"
+            step="10000"
+            value="400000"
           />
-          <span class="value" data-for="max-grass-instances">50000</span>
+          <span class="value" data-for="max-grass-instances">400000</span>
         </label>
       </fieldset>
       <p class="hint">CTRL + mouse to sculpt (mode from selector).</p>

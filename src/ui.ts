@@ -30,8 +30,8 @@ export function setupUI() {
     windStrength: getNumber("wind-strength", 0.25),
     windFrequency: getNumber("wind-frequency", 1.5),
     gustStrength: getNumber("gust-strength", 0.35),
-    grassVariation: getNumber("grass-variation", 0.5),
-    maxGrassInstances: getNumber("max-grass-instances", 50000),
+    grassVariation: getNumber("grass-variation", 1),
+    maxGrassInstances: getNumber("max-grass-instances", 400000),
   };
 
   const notify = () => listeners.forEach((fn) => fn());

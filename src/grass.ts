@@ -159,20 +159,39 @@ export function createGrassDensityMap(
         sampleStepV,
       );
 
-      let density = 0;
-      if (
-        h >= params.minHeight &&
-        h <= params.maxHeight &&
-        slope <= params.maxSlope
-      ) {
-        const slopeNormalized = Math.min(1, slope / maxSlope);
-        const baseNoise =
-          0.5 +
-          0.25 * Math.sin(u * 37.2 + v * 91.7) +
-          0.25 * Math.cos(u * 21.1 - v * 47.0);
-        density = baseNoise * (1 - 0.5 * slopeNormalized);
-        density = Math.min(1, Math.max(0, density));
+      const heightRange = params.maxHeight - params.minHeight;
+      let heightMask = 0;
+      if (heightRange > 0) {
+        const t = (h - params.minHeight) / heightRange;
+        const tClamped = Math.max(0, Math.min(1, t));
+        heightMask = 1 - Math.abs(tClamped - 0.5) * 2;
+        heightMask = Math.max(0, heightMask);
+      } else {
+        heightMask = 1;
       }
+
+      const slopeT = slope / maxSlope;
+      const slopeClamped = Math.max(0, Math.min(1, slopeT));
+      let slopeMask = 1 - Math.max(0, slopeClamped - 0.6) / 0.4;
+      slopeMask = Math.max(0, Math.min(1, slopeMask));
+
+      const mask = heightMask * slopeMask;
+      let density = 0;
+      if (mask <= 0) {
+        density = 0;
+      } else {
+        const n = pseudoNoise2D(u, v) * 0.7 + 0.3;
+
+        // micro-noise per spezzare pattern di riga
+        const microNoise =
+          (pseudoNoise2D(u * 7.13 + 13.7, v * 9.17 + 3.1) - 0.5) * 0.2; // [-0.1, +0.1]
+
+        const minBase = 0.35;
+        let raw = n + microNoise;
+        raw *= mask;
+        density = minBase + (1 - minBase) * raw;
+      }
+      density = Math.max(0, Math.min(1, density));
 
       data[y * width + x] = density;
     }
@@ -194,7 +213,7 @@ export function createGrassInstancedMesh(
   options: GrassInstancingOptions,
 ): GrassInstanceResult {
   const maxInstances = options.maxInstances ?? 50_000;
-  const maxPerTexel = 3;
+  const maxPerTexel = 6;
 
   // Compute expected total instances to scale uniformly when capped.
   let totalExpected = 0;
@@ -362,8 +381,13 @@ export function createGrassInstancedMesh(
           const densityValue = density.data[y * density.width + x];
           if (densityValue <= 0) continue;
 
-          const u = density.width > 0 ? (x + 0.5) / density.width : 0.5;
-          const v = density.height > 0 ? (y + 0.5) / density.height : 0.5;
+          // size di una cella in UV
+          const cellUSize = density.width > 0 ? 1 / density.width : 1;
+          const cellVSize = density.height > 0 ? 1 / density.height : 1;
+
+          // UV del centro cella
+          const baseU = density.width > 0 ? (x + 0.5) / density.width : 0.5;
+          const baseV = density.height > 0 ? (y + 0.5) / density.height : 0.5;
 
           const baseRand = pseudoRandom(x, y, 0.37);
           const expected = densityValue * maxPerTexel;
@@ -379,26 +403,37 @@ export function createGrassInstancedMesh(
 
           for (let i = 0; i < count && instanceIndex < maxInstances; i++) {
             const localRand = pseudoRandom(x, y, i * 1.37 + baseRand);
-            const jitterX = pseudoRandom(x, y, i * 2.11) - 0.5;
-            const jitterZ = pseudoRandom(x, y, i * 3.73 + 1) - 0.5;
-            const worldX = (u - 0.5) * worldWidth + jitterX * 0.4;
-            const worldZ = (v - 0.5) * worldHeight + jitterZ * 0.4;
-            const height = sampleHeight(heightfield, u, v) * options.heightScale;
+
+            // jitter in UV dentro la cella: [-0.5,+0.5] texel
+            const jitterU = (pseudoRandom(x, y, i * 2.11) - 0.5) * cellUSize;
+            const jitterV = (pseudoRandom(x, y, i * 3.73 + 1) - 0.5) * cellVSize;
+
+            const sampleU = clamp(baseU + jitterU, 0, 1);
+            const sampleV = clamp(baseV + jitterV, 0, 1);
+
+            // world pos derivata dagli UV jitterati
+            const worldX = (sampleU - 0.5) * worldWidth;
+            const worldZ = (sampleV - 0.5) * worldHeight;
+
+            // altezza campionata nello stesso punto
+            const height = sampleHeight(heightfield, sampleU, sampleV) * options.heightScale;
 
             position.set(worldX, height, worldZ);
+
             const yaw = localRand * Math.PI * 2;
             const tiltX = (pseudoRandom(x, y, i * 5.13) - 0.5) * 0.2;
             const tiltZ = (pseudoRandom(x, y, i * 7.91) - 0.5) * 0.2;
             rotation.set(tiltX, yaw, tiltZ);
 
+            const variation = pseudoRandom(x, y, i * 9.31);
             const scaleY = 0.8 + localRand * 0.6;
-            const scaleX = 0.6 + pseudoRandom(x, y, i * 9.31) * 0.5;
+            const scaleX = 0.4 + variation * 0.4;
             scale.set(scaleX, scaleY, 1);
 
             quaternion.setFromEuler(rotation);
             matrix.compose(position, quaternion, scale);
-            const variation = Math.random();
-            phaseArray[instanceIndex] = Math.random() * Math.PI * 2;
+
+            phaseArray[instanceIndex] = baseRand * Math.PI * 2;
             stiffnessArray[instanceIndex] = Math.random();
             colorFactorArray[instanceIndex] = variation;
             heightFactorArray[instanceIndex] = variation;
@@ -526,6 +561,14 @@ function estimateSlope(
   const dx = (hR - hL) * 0.5;
   const dy = (hU - hD) * 0.5;
   return Math.sqrt(dx * dx + dy * dy);
+}
+
+function pseudoNoise2D(u: number, v: number) {
+  return (
+    0.5 +
+    0.25 * Math.sin(u * 37.2 + v * 91.7) +
+    0.25 * Math.cos(u * 21.1 - v * 47.0)
+  );
 }
 
 function pseudoRandom(x: number, y: number, seed: number) {

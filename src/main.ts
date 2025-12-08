@@ -3,6 +3,11 @@ import {
   Color,
   DirectionalLight,
   InstancedMesh,
+  BufferAttribute,
+  BufferGeometry,
+  Float32BufferAttribute,
+  Line,
+  LineBasicMaterial,
   PerspectiveCamera,
   Scene,
 } from "three";
@@ -69,6 +74,13 @@ const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 ui.setupUI();
 
+const brushIndicator = createBrushIndicator();
+scene.add(brushIndicator);
+
+const fpsDisplay = document.getElementById("fps-counter");
+let fpsWindowStart = performance.now();
+let fpsFrameCount = 0;
+
 const brushConfig: SculptBrushConfig = {
   radius: 10,
   intensity: 0.12,
@@ -110,12 +122,19 @@ scene.add(terrainMesh);
 refreshTerrain();
 refreshGrassDensity();
 
+let isSculpting = false;
+let grassUpdatePending = false;
+let pausedWindDurationMs = 0;
+let windPauseStart: number | null = null;
+
 ui.subscribe(() => {
   refreshTerrain();
   refreshGrassDensity();
 });
 
 setupInput(canvas, camera, terrainMesh, ({ uv, buttons, ctrlKey }) => {
+  updateBrushIndicator(uv);
+
   // Sculpt only when CTRL is held with a mouse button.
   if (!ctrlKey && !ctrlActive) return;
   const isPrimary = (buttons & 1) !== 0;
@@ -143,15 +162,37 @@ setupInput(canvas, camera, terrainMesh, ({ uv, buttons, ctrlKey }) => {
     mode = isSecondary ? "lower" : "raise";
   }
 
+  if (!isSculpting) {
+    isSculpting = true;
+    grassUpdatePending = false;
+    windPauseStart = performance.now();
+  }
+
   applyBrush(heightfield, xIndex, yIndex, { ...brushConfig, mode });
   refreshTerrain();
-  refreshGrassDensity();
+  grassUpdatePending = true;
 
   const height = heightfield.getHeight(xIndex, yIndex);
   console.log(
     `Pick -> x: ${xIndex}, y: ${yIndex}, height: ${height.toFixed(3)}, mode: ${mode}`,
   );
 });
+
+const endSculpting = () => {
+  if (!isSculpting) return;
+  isSculpting = false;
+  if (windPauseStart !== null) {
+    pausedWindDurationMs += performance.now() - windPauseStart;
+    windPauseStart = null;
+  }
+  if (grassUpdatePending) {
+    refreshGrassDensity();
+    grassUpdatePending = false;
+  }
+};
+
+window.addEventListener("mouseup", endSculpting);
+window.addEventListener("blur", endSculpting);
 
 function refreshTerrain() {
   updateTerrainGeometryFromHeightfield(
@@ -173,6 +214,8 @@ function refreshGrassDensity() {
     minHeight: uiState.heightLow,
     maxHeight: uiState.heightHigh,
     maxSlope: uiState.slopeThreshold,
+    // Increase density resolution to allow reaching high instance counts (e.g. 400k)
+    resolution: Math.max(heightfield.width, heightfield.height) * 2,
   });
   console.log("Grass density map rebuilt", {
     width: grassDensity.width,
@@ -213,15 +256,33 @@ function resize() {
 let startTime = performance.now();
 
 function render(now: number) {
-  const elapsed = (now - startTime) * 0.001;
+  if (fpsDisplay) {
+    fpsFrameCount++;
+    const elapsed = now - fpsWindowStart;
+    if (elapsed >= 500) {
+      const fps = (fpsFrameCount / elapsed) * 1000;
+      fpsDisplay.textContent = `FPS: ${fps.toFixed(1)}`;
+      fpsFrameCount = 0;
+      fpsWindowStart = now;
+    }
+  }
+
+  const pausedTime =
+    pausedWindDurationMs +
+    (isSculpting && windPauseStart !== null
+      ? now - windPauseStart
+      : 0);
+  const windTime = (now - startTime - pausedTime) * 0.001;
 
   const uiState = ui.getState();
-  updateGrassWind(elapsed, {
-    windStrength: uiState.windStrength,
-    windFrequency: uiState.windFrequency,
-    gustStrength: uiState.gustStrength,
-    grassVariation: uiState.grassVariation,
-  });
+  if (!isSculpting) {
+    updateGrassWind(windTime, {
+      windStrength: uiState.windStrength,
+      windFrequency: uiState.windFrequency,
+      gustStrength: uiState.gustStrength,
+      grassVariation: uiState.grassVariation,
+    });
+  }
 
   if (grassLodContext && grassLodContext.patches.length > 0) {
     // TODO: usare GrassLodContext per LOD per patch (es. ridurre contributo delle patch lontane).
@@ -234,6 +295,9 @@ function render(now: number) {
 }
 
 window.addEventListener("resize", resize);
+canvas.addEventListener("mouseleave", () => {
+  brushIndicator.visible = false;
+});
 
 async function start() {
   await renderer.init();
@@ -244,3 +308,73 @@ async function start() {
 start().catch((error) => {
   console.error("Failed to initialize renderer", error);
 });
+
+function createBrushIndicator(): Line {
+  const segments = 64;
+  const positions = new Float32Array(segments * 3);
+  const geometry = new BufferGeometry();
+  geometry.setAttribute("position", new Float32BufferAttribute(positions, 3));
+  geometry.setDrawRange(0, segments);
+  const material = new LineBasicMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0.9,
+    depthWrite: false,
+  });
+  const line = new Line(geometry, material);
+  line.visible = false;
+  line.renderOrder = 2;
+  return line;
+}
+
+function updateBrushIndicator(uv: { x: number; y: number }) {
+  if (!brushIndicator) return;
+  const uiState = ui.getState();
+  const radius = uiState.brushRadius;
+  const worldWidth = heightfield.width - 1;
+  const worldHeight = heightfield.height - 1;
+  const centerX = uv.x * worldWidth - worldWidth * 0.5;
+  const centerZ = (1 - uv.y) * worldHeight - worldHeight * 0.5;
+  const positionAttr = brushIndicator.geometry.getAttribute(
+    "position",
+  ) as BufferAttribute;
+  const arr = positionAttr.array as Float32Array;
+  const segments = arr.length / 3;
+  for (let i = 0; i < segments; i++) {
+    const angle = (i / segments) * Math.PI * 2;
+    const px = centerX + Math.cos(angle) * radius;
+    const pz = centerZ + Math.sin(angle) * radius;
+    const ph = sampleHeightAtWorld(px, pz) * heightScale + 0.01;
+    arr[i * 3] = px;
+    arr[i * 3 + 1] = ph;
+    arr[i * 3 + 2] = pz;
+  }
+  positionAttr.needsUpdate = true;
+  brushIndicator.visible = true;
+}
+
+function sampleHeightAtWorld(worldX: number, worldZ: number): number {
+  const worldWidth = heightfield.width - 1;
+  const worldHeight = heightfield.height - 1;
+  const u = worldWidth !== 0 ? worldX / worldWidth + 0.5 : 0.5;
+  const v = worldHeight !== 0 ? worldZ / worldHeight + 0.5 : 0.5;
+  const x = clamp(u, 0, 1) * (heightfield.width - 1);
+  const y = clamp(v, 0, 1) * (heightfield.height - 1);
+  const x0 = Math.floor(x);
+  const y0 = Math.floor(y);
+  const x1 = Math.min(heightfield.width - 1, x0 + 1);
+  const y1 = Math.min(heightfield.height - 1, y0 + 1);
+  const tx = x - x0;
+  const ty = y - y0;
+  const h00 = heightfield.getHeight(x0, y0);
+  const h10 = heightfield.getHeight(x1, y0);
+  const h01 = heightfield.getHeight(x0, y1);
+  const h11 = heightfield.getHeight(x1, y1);
+  const hx0 = h00 * (1 - tx) + h10 * tx;
+  const hx1 = h01 * (1 - tx) + h11 * tx;
+  return hx0 * (1 - ty) + hx1 * ty;
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
